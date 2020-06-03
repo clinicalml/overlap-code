@@ -13,7 +13,7 @@ from sklearn.metrics import roc_auc_score
 
 # For BCS
 from .BCS.overlap_boolean_rule import OverlapBooleanRule
-from .BCS.load_process_data_BCS import extract_target, binarize_features, FeatureBinarizer
+from .BCS.load_process_data_BCS import extract_target, FeatureBinarizer
 
 # Overrule imports
 from .utils import sampleUnif, sample_reference, rule_str
@@ -181,7 +181,7 @@ class BCSRulesetEstimator(RulesetEstimator):
 
     def __init__(self, lambda0=0., lambda1=0., cat_cols=[],
                  n_ref_multiplier=1., negations=True, num_thresh=9,
-                 seed=None, **kwargs):
+                 seed=None, ref_range=None, thresh_override=None, **kwargs):
         """Initializes the estimator
 
         @args:
@@ -192,6 +192,16 @@ class BCSRulesetEstimator(RulesetEstimator):
             negations: Whether to use negations of literals
             num_thresh: Number of bins for continuous variables
             seed: Random seed for reference samples
+            ref_range: Manual override of the range for reference samples, given as a
+                       dictionary of {column_name: 
+                                       {'is_binary': true/false,
+                                        'min': min
+                                        'max': max}
+                                      }
+            thresh_override: Manual override of the thresholds for continuous
+                features, given as a dictionary like this, will only be applied
+                to continuous features with more than num_thresh unique values
+                    {column_name: np.linspace(0, 100, 10)}
             kwargs: Keyword arguments for the OverlapBooleanRule
                     (see ./BCS/overlap_boolean_rule.py for description of arguments)
         """
@@ -204,6 +214,8 @@ class BCSRulesetEstimator(RulesetEstimator):
         self.negations = negations
         self.num_thresh = num_thresh
         self.seed = seed
+        self.ref_range = ref_range
+        self.thresh_override = thresh_override
 
         # @TODO: something not right if these are set for the constructor
         # using partial() and then passed to GridSearchCV. not passed on.
@@ -220,6 +232,15 @@ class BCSRulesetEstimator(RulesetEstimator):
         self.valid_params = ['lambda0', 'lambda1', 'cat_cols',
             'n_ref_multiplier', 'negations', 'num_thresh', 'seed']
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'logger' in self.kwargs.keys():
+            state['kwargs']['logger'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
     def init_estimator_(self):
 
         """ Init rule set estimator and binarizer """
@@ -227,7 +248,8 @@ class BCSRulesetEstimator(RulesetEstimator):
                     lambda1=self.lambda1, **self.kwargs)
 
         self.FeatureBinarizer = FeatureBinarizer(negations=self.negations,
-                    colCateg=self.cat_cols, numThresh=self.num_thresh)
+                    colCateg=self.cat_cols, numThresh=self.num_thresh,
+                    threshOverride=self.thresh_override)
 
     def fit(self, x, o):
         """ Fit the overlap region based on a sample x and an indicator for
@@ -251,7 +273,8 @@ class BCSRulesetEstimator(RulesetEstimator):
             or isinstance(o, pd.Series)) else o.ravel()
 
         # Sample from reference measure and construct features
-        self.refSamples = sample_reference(X, n=nRef, seed=self.seed)
+        self.refSamples = sample_reference(X, n=nRef, seed=self.seed,
+                                           ref_range=self.ref_range)
 
         # Add reference samples
         data = pd.concat([X, self.refSamples], axis=0, sort=False)
@@ -282,7 +305,9 @@ class BCSRulesetEstimator(RulesetEstimator):
 
         X = self.FeatureBinarizer.transform(data).fillna(0)
 
-        return self.M.predict(X)
+        preds = self.M.predict(X)
+
+        return preds
 
     def predict_rules(self, x):
         """ Predict rules activated by x
@@ -297,6 +322,15 @@ class BCSRulesetEstimator(RulesetEstimator):
         X = self.FeatureBinarizer.transform(data).fillna(0)
 
         return self.M.predict_rules(X)
+
+    def get_objective_value_(self, x, o):
+        # Construct features dataframe
+        data = x if isinstance(x, pd.DataFrame) \
+            else pd.DataFrame(dict([('x%d' % i, x[:,i]) for i in range(x.shape[1])]))
+
+        X = self.FeatureBinarizer.transform(data).fillna(0)
+
+        return self.M.get_objective_value(X, o)
 
     def round_(self, x, o, scoring='roc_auc', **kwargs):
         """ Round rule set """

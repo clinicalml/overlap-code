@@ -247,8 +247,10 @@ class FeatureBinarizer(TransformerMixin):
             numThresh = number of quantile thresholds used to binarize ordinal variables (default 9)
             negations = whether to append negations
             threshStr = whether to convert thresholds on ordinal features to strings
+            threshOverride = dictionary of {colname : np.linspace object} to define cuts
     '''
-    def __init__(self, colCateg=[], numThresh=9, negations=False, threshStr=False, **kwargs):
+    def __init__(self, colCateg=[], numThresh=9, negations=False,
+            threshStr=False, threshOverride={}, **kwargs):
         # List of categorical columns
         if type(colCateg) is pd.Series:
             self.colCateg = colCateg.tolist()
@@ -256,6 +258,8 @@ class FeatureBinarizer(TransformerMixin):
             self.colCateg = [colCateg]
         else:
             self.colCateg = colCateg
+
+        self.threshOverride = {} if threshOverride is None else threshOverride
         # Number of quantile thresholds used to binarize ordinal features
         self.numThresh = numThresh
         self.thresh = {}
@@ -306,6 +310,8 @@ class FeatureBinarizer(TransformerMixin):
                     # Thresholds are sorted unique values excluding maximum
                     thresh[c] = np.sort(data[c].unique())[:-1]
                 # Many unique values
+                elif c in self.threshOverride.keys():
+                    thresh[c] = self.threshOverride[c]
                 else:
                     # Thresholds are quantiles excluding repetitions
                     thresh[c] = data[c].quantile(q=quantProb).unique()

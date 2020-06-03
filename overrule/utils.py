@@ -9,6 +9,7 @@ from sklearn.metrics import precision_score, recall_score, roc_auc_score, f1_sco
 import matplotlib.pyplot as plt
 import itertools
 from sklearn import linear_model
+import logging
 
 def sampleUnif(x, n=10000, seed=None):
     """Generates samples from a uniform distribution over the max / min of each
@@ -44,7 +45,7 @@ def log(path, str='', output=True, start=False):
     if output:
         print(str)
 
-def sample_reference(x, n=None, cat_cols=[], seed=None):
+def sample_reference(x, n=None, cat_cols=[], seed=None, ref_range=None):
     """Generates samples from a uniform distribution over the columns of X
 
     @args:
@@ -62,29 +63,44 @@ def sample_reference(x, n=None, cat_cols=[], seed=None):
         np.random.seed(seed)
 
     data = x if isinstance(x, pd.DataFrame) else pd.DataFrame(x)
+    
+    if ref_range is not None:
+        assert isinstance(ref_range, dict)
+    else:
+        ref_range = {}
 
     ref_cols = {}
     counter = seed
     # Iterate over columns
     for c in data:
-        # number of unique values
-        valUniq = data[c].nunique()
+        if c in ref_range.keys():
+            # logging.info("Using provided reference range for {}".format(c))
+            if ref_range[c]['is_binary']:
+                ref_cols[c] = np.random.choice([0, 1], n)
+            else:
+                ref_cols[c] = np.random.uniform(
+                               low=ref_range[c]['min'],
+                               high=ref_range[c]['max'],
+                               size=(n, 1)).ravel()
+        else:            
+            # number of unique values
+            valUniq = data[c].nunique()
 
-        # Constant column
-        if valUniq < 2:
-            ref_cols[c] = [data[c].values[0]]*n
+            # Constant column
+            if valUniq < 2:
+                ref_cols[c] = [data[c].values[0]]*n
 
-        # Binary column
-        elif valUniq == 2 or (c in cat_cols) or (data[c].dtype == 'object'):
-            cs = data[c].unique()
-            ref_cols[c] = np.random.choice(cs, n)
+            # Binary column
+            elif valUniq == 2 or (c in cat_cols) or (data[c].dtype == 'object'):
+                cs = data[c].unique()
+                ref_cols[c] = np.random.choice(cs, n)
 
-        # Ordinal column (seed = counter so not correlated)
-        elif np.issubdtype(data[c].dtype, np.dtype(int).type) \
-            | np.issubdtype(data[c].dtype, np.dtype(float).type):
-            ref_cols[c] = sampleUnif(data[[c]].values, n, seed=counter).ravel()
-            if counter is not None:
-                counter += 1
+            # Ordinal column (seed = counter so not correlated)
+            elif np.issubdtype(data[c].dtype, np.dtype(int).type) \
+                | np.issubdtype(data[c].dtype, np.dtype(float).type):
+                ref_cols[c] = sampleUnif(data[[c]].values, n, seed=counter).ravel()
+                if counter is not None:
+                    counter += 1
 
     return pd.DataFrame(ref_cols)
 

@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 # ----------------------------------------------#
 # OverRule: Overlap Estimation using Rule Sets  #
-# @Authors: Dennis Wei, Fredrik Johansson       #
+# @Authors: Dennis Wei, Michael Oberst,         #
+#           Fredrik D. Johansson                #
 # ----------------------------------------------#
 
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -18,6 +20,7 @@ class OverlapBooleanRule(object):
     """Overlap Boolean Rule class in the style of scikit-learn"""
     def __init__(self, alpha=0.9, hamming=True, gamma=1, lambda0=1, lambda1=1, K=10, \
                  iterMax=100, eps=1e-6, silent=False, CNF=False, verbose=False, solver='ECOS', D=10,
+                 logger=None, B=5,
                  rounding='coverage'):
         # Fraction of overlap set to cover
         self.alpha = alpha
@@ -35,27 +38,43 @@ class OverlapBooleanRule(object):
         self.eps = eps
         # Silence output
         self.silent = silent
+        if logger is None:
+            logger = logging.getLogger('OverlapBooleanRule')
+        self.logger = logger
         # CNF instead of DNF (NOTE: CNF=True and hamming=False not supported)
         self.CNF = CNF
         # Verbose optimizer
         self.verbose = verbose
         # Solver
         self.solver = solver
-        # Depth
+        # LP 
+        self.lp_obj_value = None
+        # Maximum Rules considered at each expansion
         self.D = D
         # Rounding
         self.rounding = rounding
+        # Beam search width
+        self.B = B
 
         # For get_params / set_params
         # @TODO: Maybe make this class variable?
         self.valid_params = ['alpha', 'hamming', 'gamma', 'lambda0',
                              'lambda1', 'K', 'iterMax', 'eps',
-                             'silent', 'CNF', 'D']
+                             'silent', 'CNF', 'D', 'B']
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['logger']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.logger = None
 
     def fit(self, X, y):
         """Fit model to training data"""
         if not self.silent:
-            print('Learning Boolean rule set on %s form %s hamming loss' % ('CNF' if self.CNF else 'DNF', 'with' if self.hamming else 'without'))
+            self.logger.info('Learning Boolean rule set on %s form %s hamming loss' % ('CNF' if self.CNF else 'DNF', 'with' if self.hamming else 'without'))
 
         # Overlap (y = +1), non-overlap (y = 0), and uniform background (y = -1) samples
         O = np.where(y > 0)[0]
@@ -64,6 +83,10 @@ class OverlapBooleanRule(object):
         nO = len(O)
         nN = len(N)
         nU = len(U)
+
+        # MKO: We should always have overlap samples, and either background or
+        # non-overlap samples
+        assert nO > 0 and (nU > 0 or nN > 0)
 
         # Initialize with empty and singleton conjunctions, i.e. X plus all-ones feature
         # Feature indicator and conjunction matrices
@@ -75,7 +98,8 @@ class OverlapBooleanRule(object):
         # Variables
         w = cvx.Variable(A.shape[1], nonneg=True)
         if self.CNF:
-            xiN = cvx.Variable(nN, nonneg=True)
+            if nN:
+                xiN = cvx.Variable(nN, nonneg=True)
             if nU:
                 xiU = cvx.Variable(nU, nonneg=True)
         else:
@@ -101,15 +125,22 @@ class OverlapBooleanRule(object):
                 obj = cvx.Minimize(cvx.sum(A[N,:] * w)/ nN + lambdas * w)
         else:
             if nU:
-                obj = cvx.Minimize(cvx.sum(xiN)/(nN*(1+self.gamma)) +\
-                                   self.gamma * cvx.sum(xiU)/(nU*(1+self.gamma)) +\
-                                   lambdas * w)
+                if nN:
+                    obj = cvx.Minimize(cvx.sum(xiN)/(nN*(1+self.gamma)) +\
+                                       self.gamma * cvx.sum(xiU)/(nU*(1+self.gamma)) +\
+                                       lambdas * w)
+                else:
+                    obj = cvx.Minimize(cvx.sum(xiU) / nU + lambdas * w)
             else:
                 obj = cvx.Minimize(cvx.sum(xiN) / nN + lambdas * w)
         # Constraints
         if self.CNF:
-            constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO,
-                           xiN + A[N,:] * w >= 1]
+            if nN:
+                constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO,
+                               xiN + A[N,:] * w >= 1]
+            else:
+                constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO]
+
             if nU:
                 constraints.append(xiU + A[U,:] * w >= 1)
         else:
@@ -128,9 +159,13 @@ class OverlapBooleanRule(object):
         r = np.zeros_like(y, dtype=float)
         if self.CNF:
             r[O] = constraints[0].dual_value
-            r[N] = -constraints[1].dual_value
-            if nU:
+            if nN and nU:
+                r[N] = -constraints[1].dual_value
                 r[U] = -constraints[2].dual_value
+            elif nU:
+                r[U] = -constraints[1].dual_value
+            else:
+                r[N] = -constraints[1].dual_value
         else:
             r[O] = -constraints[1].dual_value
             if self.hamming:
@@ -147,7 +182,7 @@ class OverlapBooleanRule(object):
                     r[U[xiU.value < self.eps]] = self.gamma / (nU * (1+self.gamma))
 
         if not self.silent:
-            print('Initial solve completed')
+            self.logger.info('Initial solve completed')
 
         # Beam search for conjunctions with negative reduced cost
         if self.hamming:
@@ -155,16 +190,18 @@ class OverlapBooleanRule(object):
             UB = np.dot(r, A) + lambdas
             #print('UB.min():', UB.min())
             UB = min(UB.min(), 0)
-            v, zNew, Anew = beam_search(r, X, self.lambda0, self.lambda1, K=self.K, UB=UB, eps=self.eps, D=self.D)
+            v, zNew, Anew = beam_search(r, X, self.lambda0, self.lambda1,
+                    K=self.K, UB=UB, eps=self.eps, B=self.B, D=self.D)
         else:
-            v, zNew, Anew = beam_search_no_dup(r, X, self.lambda0, self.lambda1, z, K=self.K, eps=self.eps, D=self.D)
+            v, zNew, Anew = beam_search_no_dup(r, X, self.lambda0, self.lambda1,
+                    z, K=self.K, eps=self.eps, B=self.B, D=self.D)
 
         while (v < -self.eps).any() and (self.it < self.iterMax):
             # Negative reduced costs found
             self.it += 1
 
             if not self.silent:
-                print('Iteration: %d, Objective: %.4f' % (self.it, prob.value))
+                self.logger.info('Iteration: %d, Objective: %.4f' % (self.it, prob.value))
 
             # Add to existing conjunctions
             z = pd.concat([z, zNew], axis=1, ignore_index=True)
@@ -186,16 +223,22 @@ class OverlapBooleanRule(object):
                 else:
                     obj = cvx.Minimize(cvx.sum(A[N,:] * w)/ nN + lambdas * w)
             else:
-                if nU:
+                if nU and nN:
                     obj = cvx.Minimize(cvx.sum(xiN)/(nN*(1+self.gamma)) +\
                                        self.gamma * cvx.sum(xiU)/(nU*(1+self.gamma)) +\
                                        lambdas * w)
+                elif nU:
+                    obj = cvx.Minimize(cvx.sum(xiU) / nU + lambdas * w)
                 else:
                     obj = cvx.Minimize(cvx.sum(xiN) / nN + lambdas * w)
             # Constraints
             if self.CNF:
-                constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO,
-                               xiN + A[N,:] * w >= 1]
+                if nN:
+                    constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO,
+                                   xiN + A[N,:] * w >= 1]
+                else:
+                    constraints = [cvx.sum(A[O,:] * w) <= (1 - self.alpha) * nO]
+
                 if nU:
                     constraints.append(xiU + A[U,:] * w >= 1)
             else:
@@ -214,9 +257,13 @@ class OverlapBooleanRule(object):
             r = np.zeros_like(y, dtype=float)
             if self.CNF:
                 r[O] = constraints[0].dual_value
-                r[N] = -constraints[1].dual_value
-                if nU:
+                if nN and nU:
+                    r[N] = -constraints[1].dual_value
                     r[U] = -constraints[2].dual_value
+                elif nU:
+                    r[U] = -constraints[1].dual_value
+                else:
+                    r[N] = -constraints[1].dual_value
             else:
                 r[O] = -constraints[1].dual_value
                 if self.hamming:
@@ -238,19 +285,32 @@ class OverlapBooleanRule(object):
                 UB = np.dot(r, A) + lambdas
                 #print('UB.min():', UB.min())
                 UB = min(UB.min(), 0)
-                v, zNew, Anew = beam_search(r, X, self.lambda0, self.lambda1, K=self.K, UB=UB, eps=self.eps, D=self.D)
+                v, zNew, Anew = beam_search(r, X, self.lambda0, self.lambda1,
+                        K=self.K, UB=UB, eps=self.eps, B=self.B, D=self.D)
             else:
-                v, zNew, Anew = beam_search_no_dup(r, X, self.lambda0, self.lambda1, z, K=self.K, eps=self.eps, D=self.D)
+                v, zNew, Anew = beam_search_no_dup(r, X, self.lambda0, self.lambda1, z, K=self.K, eps=self.eps, D=self.D, B=self.B)
 
         # Save generated conjunctions and coefficients
         self.z = z
         w = w.value
 
         self.w_raw = w
+        self.lp_obj_value = prob.value
 
         self.round_(X, y, scoring=self.rounding)
 
     def greedy_round_(self, X, y, xi=.5, use_lp=False, gamma=None):
+        '''
+        For DNF, this starts with no conjunctions, and adds them greedily
+        based on a cost, which penalizes (any) inclusion of reference samples,
+        and rewards (new) inclusion of positive samples, and goes until it
+        covers at least alpha fraction of positive samples
+
+        We do the following for CNF:
+        + only consider rules that would adhere to limit on positive samples
+        + add rules to cover (new) reference samples, while
+        penalizing the coverage of positive samples
+        '''
 
         A = self.compute_conjunctions(X)
         R = np.arange(0, A.shape[1]) # Remaining conjunctions
@@ -264,33 +324,78 @@ class OverlapBooleanRule(object):
         if use_lp:
             R = [R[i] for i in range(len(R)) if self.w_raw[i]>0]
 
-        while (i<MAX_ITER) and (C[y == 1].mean() < self.alpha):
-            if (y==0).sum() > 0:
-                neg_cover = (A[(y == 0),:][:,R]).mean(0)
-            else:
-                neg_cover = 0
+        if self.CNF:
+            while (i<MAX_ITER):
+                assert (y == 0).sum() == 0, 'Neg samps not implemented for CNF'
+                assert (y == -1).sum() > 0, 'No reference samples given' 
 
-            if (y==-1).sum() > 0:
-                ref_cover = (A[(y == -1),:][:,R]).mean(0)
-            else:
-                ref_cover = 0
+                # Frac of additional ref samples that each conjunction covers
+                if A[(y == -1) & (C < 1), :].shape[0] == 0:
+                    self.logger.info(
+                        "Rounded rules cover all reference samples!")
+                    break
 
-            # Regularization
-            reg = self.lambda1 * self.z.values[:,R].sum(0)
+                ref_new_cover = (A[(y == -1) & (C < 1),:][:,R] + 1e-8).mean(0)
 
-            # Positive new covered
-            pos_new_cover = (A[(y == 1) & (C < 1),:][:,R] + 1e-8).mean(0)
+                # Positive samples covered (for each conjunction)
+                pos_cover = (A[(y == 1),:][:,R]).mean(0)
 
-            # Costs
-            costs = neg_cover + gamma*ref_cover + reg - xi*pos_new_cover
+                # Regularization
+                reg = self.lambda1 * self.z.values[:,R].sum(0)
 
-            r = np.argmin(costs)   # Find min-cost conjunction
-            C = (C + A[:,R[r]])>0. # Update coverage
-            U.append(R[r])
-            R = np.array([R[i] for i in range(len(R)) if not i==r])
+                # Costs (for each conjunction)
+                costs = xi*pos_cover - gamma*ref_new_cover + reg
 
-            i+=1
+                # Only consider feasible new rules, which maintain the
+                # constraint that they cannot add too many pos samples
+                # NOTE: This is a bit different than the actual constraint we
+                # use in the LP relaxation, but is closer to what we actually
+                # want
+                feasible = (C[(y == 1), np.newaxis] + A[(y == 1),:][:, R]
+                           ).mean(0) < 1 - self.alpha
+                if feasible.sum() == 0:
+                    break
 
+                costs[~feasible] = np.inf
+
+                r = np.argmin(costs)   # Find min-cost conjunction
+                C = (C + A[:,R[r]])>0. # Update coverage
+                U.append(R[r])
+                R = np.array([R[i] for i in range(len(R)) if not i==r])
+
+                i+=1
+
+        else:
+            while (i<MAX_ITER) and (C[y == 1].mean() < self.alpha):
+                if (y==0).sum() > 0:
+                    neg_cover = (A[(y == 0),:][:,R]).mean(0)
+                else:
+                    neg_cover = 0
+
+                if (y==-1).sum() > 0:
+                    # Fraction of reference samples that each conjunction covers
+                    ref_cover = (A[(y == -1),:][:,R]).mean(0)
+                else:
+                    ref_cover = 0
+
+                # Regularization (for each conjunction)
+                reg = self.lambda1 * self.z.values[:,R].sum(0)
+
+                # Positive samples newly covered (for each conjunction)
+                pos_new_cover = (A[(y == 1) & (C < 1),:][:,R] + 1e-8).mean(0)
+
+                # Costs (for each conjunction)
+                costs = neg_cover + gamma*ref_cover + reg - xi*pos_new_cover
+
+                r = np.argmin(costs)   # Find min-cost conjunction
+                C = (C + A[:,R[r]])>0. # Update coverage
+                U.append(R[r])
+                R = np.array([R[i] for i in range(len(R)) if not i==r])
+
+                i+=1
+
+
+        # Zero out the rules and only take those which are used
         self.w = np.zeros(A.shape[1])
         self.w[U] = 1
 
@@ -352,7 +457,26 @@ class OverlapBooleanRule(object):
                 # Choose the sparsest such candidate
                 self.w = wCand[:, idxFeas[-1]]
 
+    def get_objective_value(self, X, o, rounded=True):
+        if rounded:
+            w = self.w
+        else:
+            w = self.w_raw
 
+        U = np.where(o < 0)[0]
+        nU = len(U)
+        assert nU > 0
+
+        A = self.compute_conjunctions(X)
+        lambdas = self.lambda0 + self.lambda1 * self.z.sum().values
+        lambdas[0] = 0
+
+        if not self.CNF:
+            obj = np.sum(A[U,:].dot(w))/nU + lambdas.dot(w)
+        else:
+            obj = np.sum(np.maximum(1 - A[U, :].dot(w), 0))/nU + lambdas.dot(w)
+
+        return obj
 
     def compute_conjunctions(self, X):
         """Compute conjunctions of features specified in self.z"""
@@ -377,12 +501,12 @@ class OverlapBooleanRule(object):
         """Predict whether points belong to overlap region"""
         # Use helper function
         return self.predict_(X, self.w)
-
+    
     def predict_rules(self, X):
         """Predict whether points belong to overlap region"""
         # Use helper function
         A = self.compute_conjunctions(X)
-
+        
         if self.CNF:
             # Flip labels since model is actually a DNF for non-overlap
             # @TODO: Not sure if this is correct

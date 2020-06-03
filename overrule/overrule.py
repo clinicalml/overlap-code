@@ -266,7 +266,7 @@ class OverRule2Stage(OverlapEstimator):
         if self.refit_s:
             self.RS_s.fit(X, np.ones(X.shape[0]))
 
-        I_s = self.RS_s.predict(X) > 0
+        I_s = (self.RS_s.predict(X) > 0)
 
         if self.refit_o:
             if self.bb_on_support:
