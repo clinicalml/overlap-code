@@ -1,4 +1,0 @@
-Support:
-  ()
-Propensity:
-  ([Sepal length <= 6.720] ∧ [Petal length <= 5.600] ∧ [Petal length > 4.200] ∧ [Petal width <= 2.100] ∧ [Petal width > 1.300])
