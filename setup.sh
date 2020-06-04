@@ -1,5 +1,5 @@
-conda create --name overrule-test python=3.6
-source activate overrule-test
+conda create --name overrule python=3.6
+source activate overrule
 
 conda install numpy
 conda install pandas
