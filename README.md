@@ -4,11 +4,13 @@
 
 OverRule is built on Python 3 with Pandas, numpy, scikit-learn and cvxpy.
 
-## Code example
+The script `setup.sh` assumes that `anaconda` is installed, and creates a virtual environment named `overrule` for the relevant packages.  It is divided into two sections:  The first installs the minimum dependencies for `overrule` to run, and the second install dependencies required to reproducing results end-to-end (including e.g., `jupyter` and `sacred` for logging experiment results)
 
-The script `setup.sh` assumes that `anaconda` is installed, and creates a virtual environment names `overrule` for the relevant packages.
+## Reproducing Synthetic Experiments
 
-Once this is done, the shell script `run_iris_exp.sh` runs OverRule on the Iris dataset and stores the output in the folder `./results`.
+Once `setup.sh` has been run, the Jupyter Notebook `./exps/iris/exp_iris_2d.ipynb` runs OverRule on the Iris dataset and stores the output in the folder `./exps/iris/results`.  This reproduces Figure 2 in the main paper.
+
+Similarly, `./exps/supp-synthetic/README.md` gives details on how to reproduce the purely synthetic experiments in the supplement.  This reproduces Tables S1, S2, and S5 in the supplement.
 
 ## Acknowledgements
 
